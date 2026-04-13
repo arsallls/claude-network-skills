@@ -199,18 +199,6 @@ Agents:
 
 ---
 
-## These skills are also contributed to
-
-[everything-claude-code](https://github.com/affaan-m/everything-claude-code) — a community collection of Claude Code skills with 140k+ stars.
-
----
-
-## Built on top of
-
-The technical content in these skills comes from [NetNerd](https://github.com/arsallls/NetNerd) — a self-hosted AI network copilot that connects Claude to real network devices over SSH. Diagnostics, config changes, and topology mapping from a browser. If you want Claude to actually run these commands on your devices instead of just advising you, that's what NetNerd does.
-
----
-
 ## License
 
 MIT — use it, modify it, share it.
