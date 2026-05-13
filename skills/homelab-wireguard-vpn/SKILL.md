@@ -1,20 +1,25 @@
 ---
 name: homelab-wireguard-vpn
 description: WireGuard VPN server setup, peer configuration, key generation, split tunneling vs full tunnel routing, and remote access to a home network from mobile and laptop clients.
-origin: ECC
+origin: community
 ---
 
 # Homelab WireGuard VPN
 
-WireGuard is a fast, modern VPN protocol. It's the right choice for remote access to a home network — simpler to configure than OpenVPN, and faster than most alternatives.
+WireGuard is a fast, modern VPN protocol. It is the right choice for remote access to a
+home network — simpler to configure than OpenVPN and faster than most alternatives.
 
-## When to Activate
+All configuration examples show common setups. Review each command — especially the
+iptables forwarding rules and key file permissions — before applying them to your
+system, and make changes in a maintenance window.
+
+## When to Use
 
 - Setting up WireGuard server on a Raspberry Pi, Linux host, pfSense, or router
 - Generating WireGuard keypairs and writing peer config files
 - Configuring remote access from a phone or laptop to a home network
 - Explaining split tunneling (route only home traffic) vs full tunnel (route all traffic)
-- Troubleshooting WireGuard connections that won't come up
+- Troubleshooting WireGuard connections that will not come up
 - Automating peer configuration generation for multiple clients
 
 ## How WireGuard Works
@@ -40,33 +45,45 @@ Traffic is encrypted end-to-end with no central server or certificate authority.
 # Install WireGuard
 sudo apt update && sudo apt install wireguard -y
 
-# Generate server keypair
-wg genkey | tee /etc/wireguard/server_private.key | wg pubkey > /etc/wireguard/server_public.key
-sudo chmod 600 /etc/wireguard/server_private.key
+# Generate server keypair — create files with private permissions from the start
+sudo mkdir -p /etc/wireguard
+sudo sh -c 'umask 077; wg genkey > /etc/wireguard/server_private.key'
+sudo sh -c 'wg pubkey < /etc/wireguard/server_private.key > /etc/wireguard/server_public.key'
 
-# Server config: /etc/wireguard/wg0.conf
-sudo tee /etc/wireguard/wg0.conf << EOF
+# Write server config — substitute the actual private key value
+# Do not store private keys in version control or share them
+sudo tee /etc/wireguard/wg0.conf << 'EOF'
 [Interface]
 Address = 10.8.0.1/24              # VPN subnet — server gets .1
 ListenPort = 51820
-PrivateKey = $(cat /etc/wireguard/server_private.key)
-PostUp = iptables -A FORWARD -i wg0 -j ACCEPT; iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE
-PostDown = iptables -D FORWARD -i wg0 -j ACCEPT; iptables -t nat -D POSTROUTING -o eth0 -j MASQUERADE
+PrivateKey = <paste_server_private_key_here>
+
+# Scoped forwarding rules: allow VPN traffic in/out, not a blanket FORWARD ACCEPT
+PostUp   = iptables -A FORWARD -i wg0 -o eth0 -j ACCEPT
+PostUp   = iptables -A FORWARD -i eth0 -o wg0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+PostUp   = iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE
+PostDown = iptables -D FORWARD -i wg0 -o eth0 -j ACCEPT
+PostDown = iptables -D FORWARD -i eth0 -o wg0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+PostDown = iptables -t nat -D POSTROUTING -o eth0 -j MASQUERADE
 
 [Peer]
-# Phone
+# Phone — replace with the actual phone public key
 PublicKey = <phone_public_key>
-AllowedIPs = 10.8.0.2/32           # This peer gets .2 on the VPN
+AllowedIPs = 10.8.0.2/32
 
 [Peer]
-# Laptop
+# Laptop — replace with the actual laptop public key
 PublicKey = <laptop_public_key>
 AllowedIPs = 10.8.0.3/32
 EOF
+sudo chmod 600 /etc/wireguard/wg0.conf
 
-# Enable IP forwarding (required for routing traffic through the VPN server)
-echo "net.ipv4.ip_forward=1" | sudo tee -a /etc/sysctl.conf
-sudo sysctl -p
+# Replace eth0 with your actual outbound interface name
+# Check with: ip route show default
+
+# Enable IP forwarding (required for routing traffic through the server)
+echo "net.ipv4.ip_forward=1" | sudo tee /etc/sysctl.d/99-wireguard.conf
+sudo sysctl --system
 
 # Start WireGuard and enable on boot
 sudo wg-quick up wg0
@@ -76,20 +93,22 @@ sudo systemctl enable wg-quick@wg0
 ## Client Configuration
 
 ```bash
-# Generate client keypair (run on the client, or on the server and transfer securely)
+# Generate a unique keypair for each client device
+# Run on the client, or on the server and transfer the private key securely — never in plaintext
+umask 077
 wg genkey | tee phone_private.key | wg pubkey > phone_public.key
 
 # Client config file (phone_wg0.conf):
 [Interface]
 PrivateKey = <phone_private_key>
-Address = 10.8.0.2/32              # VPN IP for this client
+Address = 10.8.0.2/32
 DNS = 192.168.1.2                  # Optional: use Pi-hole for DNS over the tunnel
 
 [Peer]
 PublicKey = <server_public_key>
 Endpoint = your-home-ip.ddns.net:51820  # Your public IP or DDNS hostname
 AllowedIPs = 192.168.1.0/24            # Split tunnel: only home network traffic
-# AllowedIPs = 0.0.0.0/0              # Full tunnel: all traffic through VPN
+# AllowedIPs = 0.0.0.0/0, ::/0        # Full tunnel: all traffic through VPN
 
 PersistentKeepalive = 25              # Keep NAT hole open (required for mobile clients)
 ```
@@ -98,25 +117,24 @@ PersistentKeepalive = 25              # Keep NAT hole open (required for mobile 
 
 ```
 # Split tunnel: AllowedIPs = 192.168.1.0/24
-  Only traffic destined for your home network goes through the VPN
-  Internet traffic (YouTube, Spotify) goes directly — better performance on mobile
-  Best for: "I just want to reach my NAS and Pi from anywhere"
+  Only traffic destined for your home network goes through the VPN.
+  Internet traffic (YouTube, Spotify) goes directly — better performance on mobile.
+  Best for: "I just want to reach my NAS and Pi from anywhere."
 
 # Full tunnel: AllowedIPs = 0.0.0.0/0, ::/0
-  ALL traffic goes through your home internet connection
-  Useful for: using home IP for geographic reasons, piggybacking home DNS/Pi-hole
-  Downside: home upload speed becomes your bottleneck everywhere
+  ALL traffic goes through your home internet connection.
+  Useful for: piggybacking home DNS/Pi-hole ad blocking.
+  Downside: home upload speed becomes your bottleneck everywhere.
 
 # Multi-subnet split tunnel (most common homelab use case):
-  AllowedIPs = 192.168.1.0/24, 192.168.2.0/24, 192.168.3.0/24, 10.8.0.0/24
-  Routes all your VLANs through the tunnel, internet stays direct
+  AllowedIPs = 192.168.10.0/24, 192.168.20.0/24, 192.168.30.0/24, 10.8.0.0/24
+  Routes all your VLANs through the tunnel; internet stays direct.
 ```
 
 ## Key Generation and Peer Management
 
 ```python
 import subprocess
-import os
 
 def generate_keypair() -> tuple[str, str]:
     """Generate a WireGuard keypair. Returns (private_key, public_key)."""
@@ -162,6 +180,9 @@ AllowedIPs = {client_vpn_ip}/32
 """
 ```
 
+Keep private keys out of source control. If you use this script, write key material
+to files with mode 600 and never log or print it.
+
 ## pfSense / OPNsense WireGuard
 
 ```
@@ -176,41 +197,46 @@ AllowedIPs = {client_vpn_ip}/32
 
 # Assign the WireGuard interface:
   Interfaces → Assignments → Add (select wg0)
-  Enable interface, no IP needed (it's set in the tunnel config)
+  Enable interface, no IP needed (it is set in the tunnel config)
 
 # Firewall rules:
   WAN → Allow UDP port 51820 inbound (so clients can reach the server)
-  WireGuard interface → Allow traffic to LAN networks
+  WireGuard interface → Allow traffic to LAN networks you want reachable
 ```
 
 ## DDNS (Dynamic DNS) for Home Servers
 
-Most home internet connections have a dynamic IP. Use DDNS so your VPN endpoint stays reachable.
+Most home internet connections have a dynamic IP. Use DDNS so your VPN endpoint
+stays reachable after an IP change.
 
 ```bash
-# Option 1: Cloudflare DDNS (free, API-based)
-# Install ddclient or use a Docker container:
-
-# docker-compose entry:
+# Option 1: Cloudflare DDNS — store credentials in a secrets file, not inline
+# docker-compose entry using an env file:
   ddns-updater:
     image: qmcgaw/ddns-updater
-    environment:
-      CONFIG: >
-        {
-          "settings": [{
-            "provider": "cloudflare",
-            "zone_identifier": "your_zone_id",
-            "domain": "home.yourdomain.com",
-            "ttl": 120,
-            "token": "your_cf_api_token",
-            "ip_version": "ipv4"
-          }]
-        }
+    env_file: ./ddns.env   # store zone_id and token here, not in compose
     restart: unless-stopped
+
+# ddns.env (chmod 600, not committed to git):
+#   SETTINGS_CLOUDFLARE_ZONE_ID=your_zone_id
+#   SETTINGS_CLOUDFLARE_TOKEN=your_api_token
 
 # Option 2: DuckDNS (free, simple)
   Sign up at duckdns.org → get a token and subdomain (myhome.duckdns.org)
-  Cron job to update: */5 * * * * curl "https://www.duckdns.org/update?domains=myhome&token=YOUR_TOKEN&ip="
+  Store token in /etc/ddns.env (mode 600), then use a small root-owned script:
+
+  # /usr/local/bin/update-duckdns
+  #!/bin/sh
+  set -eu
+  . /etc/ddns.env
+  curl --fail --silent --show-error --max-time 10 \
+    --get "https://www.duckdns.org/update" \
+    --data-urlencode "domains=myhome" \
+    --data-urlencode "token=${DUCKDNS_TOKEN}" \
+    --data-urlencode "ip="
+
+  # Cron job:
+  */5 * * * * /usr/local/bin/update-duckdns >/dev/null 2>&1
 ```
 
 ## Troubleshooting
@@ -219,19 +245,19 @@ Most home internet connections have a dynamic IP. Use DDNS so your VPN endpoint 
 # Check WireGuard status and last handshake
 sudo wg show
 
-# If "latest handshake" is never or very old, the tunnel is not connected
+# If "latest handshake" is never or very old, the tunnel is not connected.
 # Check:
 # 1. Is UDP port 51820 open on the router/firewall?
 sudo ufw status  # or check pfSense/UniFi firewall rules
 
 # 2. Is the server public key in the client config correct?
-wg show wg0 public-key   # Compare to what's in the client config
+sudo wg show wg0 public-key   # Compare to what is in the client config
 
 # 3. Is IP forwarding enabled on the server?
 cat /proc/sys/net/ipv4/ip_forward  # Should be 1
 
-# 4. Does the client's AllowedIPs match what you're trying to reach?
-# If AllowedIPs = 192.168.1.0/24 but you're trying to reach 192.168.3.5, it won't route
+# 4. Does the client AllowedIPs cover the IP you are trying to reach?
+# If AllowedIPs = 192.168.1.0/24 and you are trying to reach 192.168.3.5, it will not route.
 
 # Check kernel logs for WireGuard errors
 dmesg | grep wireguard
@@ -244,29 +270,33 @@ sudo wg-quick down wg0 && sudo wg-quick up wg0
 
 ```
 # BAD: Storing private keys in version control or sharing them
-# Private keys are like passwords — never commit them to git
+# Private keys are equivalent to passwords — never commit them to git
 
-# BAD: Using AllowedIPs = 0.0.0.0/0 on mobile without thinking about it
-# Full tunnel routes your 4G/5G traffic through your home upload — usually slow
+# BAD: Using AllowedIPs = 0.0.0.0/0 on mobile without considering the impact
+# Full tunnel routes all mobile traffic through your home upload — usually slow
 
 # BAD: Not setting PersistentKeepalive on mobile clients
-# Mobile clients behind NAT need keepalive pings or the tunnel drops when idle
+# Mobile clients behind NAT drop idle tunnels without it
 
-# BAD: Opening port 51820 in firewall but forgetting IP forwarding on the server
-# Tunnel will connect but no traffic routes through — very confusing to debug
+# BAD: Opening port 51820 in the firewall but forgetting IP forwarding on the server
+# Tunnel connects but no traffic routes — confusing to debug
 
-# BAD: Using the same keypair for multiple clients
-# Each device must have its own unique keypair — shared keys break WireGuard's security model
+# BAD: Sharing a keypair across multiple client devices
+# Each device must have its own unique keypair — shared keys break the security model
+
+# BAD: Using a broad "FORWARD ACCEPT" iptables rule
+# Scope forwarding rules to the wg0 interface and direction only
 ```
 
 ## Best Practices
 
 - Generate a unique keypair per client device — never reuse keys
-- Use split tunneling (`AllowedIPs = <home subnets>`) for mobile — preserves mobile data performance
-- Set `PersistentKeepalive = 25` on all mobile clients to maintain NAT holes
-- Use DDNS if your ISP assigns a dynamic IP
-- Rotate the server keypair periodically and update all client configs
+- Use split tunneling (`AllowedIPs = <home subnets>`) for mobile
+- Set `PersistentKeepalive = 25` on all mobile clients
+- Use DDNS if your ISP assigns a dynamic IP; store credentials in env files, not inline
+- Use scoped iptables forwarding rules (inbound on wg0 only) rather than a blanket FORWARD ACCEPT
 - Add Pi-hole's IP as `DNS =` in client configs to get ad blocking over the VPN
+- Rotate the server keypair periodically and update all client configs
 
 ## Related Skills
 
